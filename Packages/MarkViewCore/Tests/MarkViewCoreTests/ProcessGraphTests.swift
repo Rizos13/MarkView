@@ -63,6 +63,59 @@ final class ProcessGraphTests: XCTestCase {
         XCTAssertThrowsError(try graph(edges: [edge("start", "unknown")]).validate(lineCounts: lines))
     }
 
+    func testMissingEndpointsIdentifyEveryTransitionAndMissingNode() {
+        let links = (0..<9).map { edge("start", "missing_\($0)", id: "handoff_\($0)") }
+        let value = graph(edges: links)
+        XCTAssertThrowsError(try value.validate(lineCounts: lines)) { error in
+            let detail = error.localizedDescription
+            for index in 0..<9 {
+                XCTAssertTrue(detail.contains("handoff_\(index)"))
+                XCTAssertTrue(detail.contains("missing_\(index)"))
+            }
+            XCTAssertTrue(detail.contains("start"))
+        }
+        XCTAssertEqual(value.edges, links)
+    }
+
+    func testCycleDiagnosticIdentifiesTheFeedbackPathWithoutItsIncomingPrefix() throws {
+        var value = graph(nodes: [node("entry"), node("approval"), node("recheck")], edges: [
+            edge("entry", "approval", id: "initial"),
+            edge("approval", "recheck", kind: .branch, id: "accepted"),
+            edge("recheck", "approval", kind: .branch, id: "still_held")
+        ])
+        XCTAssertThrowsError(try value.validate(lineCounts: lines)) { error in
+            let detail = error.localizedDescription
+            for id in ["approval", "recheck", "accepted", "still_held"] { XCTAssertTrue(detail.contains(id)) }
+            XCTAssertFalse(detail.contains("initial"))
+            XCTAssertTrue(detail.contains("return"))
+        }
+        XCTAssertEqual(value.edges.last?.kind, .branch)
+        value.edges[2].kind = .return
+        try value.validate(lineCounts: lines)
+        XCTAssertEqual(value.edges.count, 3)
+    }
+
+    func testExplicitReturnDoesNotHideAnotherUnmarkedCycle() {
+        let value = graph(nodes: [node("entry"), node("approval"), node("recheck")], edges: [
+            edge("entry", "approval"), edge("approval", "entry", kind: .return),
+            edge("approval", "recheck", id: "accepted"), edge("recheck", "approval", id: "still_held")
+        ])
+        XCTAssertThrowsError(try value.validate(lineCounts: lines)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("still_held"))
+        }
+    }
+
+    func testLongCycleDiagnosticIsBoundedAndIncludesTheClosingTransition() {
+        let groups = (0..<10).map { node("group_\($0)", kind: .group) }
+        let steps = groups.flatMap { group in (0..<20).map { node(group.id + "_step_\($0)", parent: group.id) } }
+        var links = zip(steps, steps.dropFirst()).map { pair in edge(pair.0.id, pair.1.id) }
+        if let first = steps.first, let last = steps.last { links.append(edge(last.id, first.id, id: "repeat_all")) }
+        XCTAssertThrowsError(try graph(nodes: groups + steps, edges: links).validate(lineCounts: lines)) { error in
+            XCTAssertLessThan(error.localizedDescription.count, 4000)
+            XCTAssertTrue(error.localizedDescription.contains("repeat_all"))
+        }
+    }
+
     func testMissingEvidenceAndMissingFilesAreRejected() {
         var value = graph()
         value.nodes[0].sources = []

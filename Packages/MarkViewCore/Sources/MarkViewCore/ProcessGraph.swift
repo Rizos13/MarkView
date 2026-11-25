@@ -156,7 +156,11 @@ public struct ProcessGraph: Codable, Equatable, Sendable {
         var edgeIDs = Set<String>()
         for edge in edges {
             if !Self.validID(edge.id) || !edgeIDs.insert(edge.id).inserted { problems.append("Invalid or duplicate edge id") }
-            if byID[edge.from] == nil || byID[edge.to] == nil { problems.append("Edge \(edge.id) has an unknown endpoint") }
+            let missing = Set([edge.from, edge.to].filter { byID[$0] == nil }).sorted()
+            if !missing.isEmpty {
+                problems.append("Edge \(edge.id) (\(edge.from) -> \(edge.to)) references undeclared nodes: "
+                    + missing.joined(separator: ", ") + ". Declare source-backed nodes or correct the endpoint ids.")
+            }
             if edge.from == edge.to && edge.kind != .return { problems.append("Self-transition \(edge.id) must be a return") }
             if edge.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || edge.label.count > 160 {
                 problems.append("Edge \(edge.id) needs a short condition or handoff label")
@@ -176,7 +180,14 @@ public struct ProcessGraph: Codable, Equatable, Sendable {
                 problems.append("Missing source or invalid line range: \(source.path.prefix(200)):\(source.line)-\(source.endLine)")
             }
         }
-        if problems.isEmpty && hasUnmarkedCycle() { problems.append("A cycle needs an explicit return transition") }
+        if problems.isEmpty, let cycle = firstUnmarkedCycle() {
+            var route = cycle.prefix(12).map { "\($0.from) -[\($0.id), kind=\($0.kind.rawValue)]-> \($0.to)" }
+            if cycle.count > 12, let closing = cycle.last {
+                route.append("...; closing edge \(closing.id): \(closing.from) -> \(closing.to)")
+            }
+            problems.append("Control-flow cycle without an explicit return: " + route.joined(separator: "; ")
+                + ". Recheck the source and mark the actual feedback edge as kind return, or correct unsupported relations.")
+        }
         if !problems.isEmpty { throw ValidationError(problems: problems) }
     }
 
@@ -215,23 +226,29 @@ public struct ProcessGraph: Codable, Equatable, Sendable {
         }
     }
 
-    private func hasUnmarkedCycle() -> Bool {
-        var indegree = Dictionary(nodes.map { ($0.id, 0) }, uniquingKeysWith: { first, _ in first })
-        var outgoing: [String: [String]] = [:]
+    private func firstUnmarkedCycle() -> [Edge]? {
+        var outgoing: [String: [Edge]] = [:]
         for edge in edges where edge.kind != .return {
-            indegree[edge.to, default: 0] += 1
-            outgoing[edge.from, default: []].append(edge.to)
+            outgoing[edge.from, default: []].append(edge)
         }
-        var ready = indegree.filter { $0.value == 0 }.map(\.key)
-        var visited = 0
-        while let id = ready.popLast() {
-            visited += 1
-            for target in outgoing[id] ?? [] {
-                indegree[target, default: 0] -= 1
-                if indegree[target] == 0 { ready.append(target) }
+        var checked = Set<String>(), active: [String: Int] = [:], path: [Edge] = []
+        func visit(_ id: String) -> [Edge]? {
+            active[id] = path.count
+            for edge in outgoing[id] ?? [] {
+                if let start = active[edge.to] { return Array(path[start...]) + [edge] }
+                if checked.contains(edge.to) { continue }
+                path.append(edge)
+                if let cycle = visit(edge.to) { return cycle }
+                path.removeLast()
             }
+            active[id] = nil
+            checked.insert(id)
+            return nil
         }
-        return visited != nodes.count
+        for node in nodes where !checked.contains(node.id) {
+            if let cycle = visit(node.id) { return cycle }
+        }
+        return nil
     }
 }
 
