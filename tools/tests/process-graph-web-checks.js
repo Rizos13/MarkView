@@ -44,6 +44,27 @@
         }
         await until(function() { return !!node('11'); }, 'The real process view draws the top-level graph');
         check(root.querySelectorAll('.process-node').length === 14, 'All fourteen groups are visible');
+        const stableEntry = node('1');
+        const priorState = state.payload.processState;
+        state.payload.processState = Object.assign({}, priorState, {
+            tracing: true, phase: 'Correcting map', attempt: 2, maximumAttempts: 3,
+            startedAt: new Date(Date.now() - 65000).toISOString()
+        });
+        global.showArchitecture(state.payload);
+        check(!q('.process-trace-status').hidden, 'A running trace has a visible status');
+        check(q('.process-trace-status').textContent.includes('Correcting map (attempt 2 of 3)'), 'Correction progress identifies its attempt');
+        check(q('.process-trace-status').textContent.includes('Elapsed 1:'), 'The trace shows elapsed time');
+        check(node('1') === stableEntry, 'Correction keeps the current map intact');
+        state.payload.processState.tracing = false;
+        state.payload.processState.traceError = 'Could not map the process: cycle approval -> recheck -> approval <details>';
+        global.showArchitecture(state.payload);
+        check(q('.process-trace-status').hidden, 'A finished trace clears its running status');
+        check(!q('.process-trace-error').hidden && q('.process-trace-error').textContent.includes('approval -> recheck -> approval'), 'The map displays the complete validation failure');
+        check(!q('.process-trace-error').querySelector('details'), 'Validation feedback is displayed as text');
+        check(node('1') === stableEntry, 'A failed replacement preserves the previous map');
+        state.payload.processState = priorState;
+        global.showArchitecture(state.payload);
+        check(q('.process-trace-error').hidden, 'A new successful state clears the old error');
         const entryBox = node('1').getBoundingClientRect(), mapBox = q('.process-viewport').getBoundingClientRect();
         check(entryBox.left >= mapBox.left + 16 && entryBox.left <= mapBox.left + 36, 'A large map starts near its leading edge without wasting half the viewport');
         check(root.querySelectorAll('.process-edge.is-return').length === 2, 'Both feedback paths are drawn');

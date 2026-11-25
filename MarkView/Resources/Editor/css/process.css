@@ -21,6 +21,8 @@
 }
 .process-question-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .process-question-actions select { max-width: 240px; }
+.process-trace-status { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 7px 9px; margin-bottom: 10px; border: 1px solid var(--border-color); border-radius: 5px; background: var(--bg-secondary); }
+.arch-process .process-trace-error { margin-bottom: 10px; padding: 8px 10px; border-left: 2px solid var(--bad-text); color: var(--bad-text); background: var(--bg-secondary); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; line-height: 1.6; user-select: text; }
 .process-scope-info { margin: 0 0 4px; color: var(--text-secondary); }
 .process-scope-info summary { cursor: pointer; }
 .arch-process .process-scope-info p { margin-top: 6px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }

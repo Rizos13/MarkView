@@ -258,7 +258,7 @@ extension EditorHostTests {
         let response = try XCTUnwrap(result, "process graph checks finished").get()
         let encoded = try XCTUnwrap(response as? String)
         let summary = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String: Int])
-        XCTAssertGreaterThanOrEqual(summary["passed"] ?? 0, 41)
+        XCTAssertGreaterThanOrEqual(summary["passed"] ?? 0, 50)
         XCTAssertEqual(summary["blocks"], 74)
     }
 }

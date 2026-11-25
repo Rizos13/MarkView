@@ -11,6 +11,11 @@
     const picker = P.element('select'); picker.setAttribute('aria-label', 'Saved process');
     const formActions = P.element('div', 'process-question-actions'); formActions.append(picker, submit, stop);
     form.append(question, formActions);
+    const traceStatus = P.element('div', 'process-trace-status'); traceStatus.hidden = true;
+    const tracePhase = P.element('span'); tracePhase.setAttribute('role', 'status');
+    const traceElapsed = P.element('span', 'arch-muted'); traceElapsed.setAttribute('aria-live', 'off');
+    traceStatus.append(tracePhase, traceElapsed);
+    const traceError = P.element('p', 'process-trace-error'); traceError.setAttribute('role', 'alert'); traceError.hidden = true;
     const scopeInfo = P.element('details', 'process-scope-info');
     const scopeTitle = P.element('summary', '', 'Process context');
     const takeaway = P.element('p'), omitted = P.element('p');
@@ -44,10 +49,11 @@
     const caption = P.element('div', 'process-map-caption');
     caption.append(P.element('span', 'arch-muted', 'Drag to pan. Pinch or Ctrl+wheel to zoom. Double-click a group to enter.'),
         P.button('Code + Explain', function() { panel.element.scrollIntoView({ block: 'start' }); }));
-    root.append(form, scopeInfo, tools, context, message, canvas, returns, caption);
+    root.append(form, traceStatus, traceError, scopeInfo, tools, context, message, canvas, returns, caption);
     let payload = {}, project = null, activeID = null, parent = null, selected = null, source = 0;
     let requestedSource = '', savedChoices = '', savedVersion = '', awaiting = false, active = false;
     let renderedKey = '', pendingKey = '', layoutToken = 0;
+    let traceTimer = null;
     const layouts = new Map(), poses = new Map(), scopeSelections = new Map(), pendingLevels = new Set();
     const surface = P.makeViewport(canvas, { select: select, openGroup: drill,
         changed: function(value) { zoomText.textContent = Math.round(value * 100) + '%'; } });
@@ -66,10 +72,34 @@
         if (activeID) scopeSelections.set(activeID + '|' + (parent || ''), selected);
     }
     function reset() {
+        stopTraceTimer(); traceStatus.hidden = true; traceError.hidden = true;
         remember(); project = null; activeID = null; parent = null; selected = null; source = 0;
         requestedSource = ''; savedChoices = ''; savedVersion = ''; awaiting = false;
         renderedKey = ''; pendingKey = ''; layoutToken += 1;
         layouts.clear(); poses.clear(); scopeSelections.clear(); pendingLevels.clear(); surface.clear();
+    }
+    function stopTraceTimer() {
+        if (traceTimer !== null) { clearInterval(traceTimer); traceTimer = null; }
+    }
+    function updateElapsed() {
+        const started = Date.parse((payload.processState || {}).startedAt || '');
+        const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+        traceElapsed.textContent = Number.isFinite(seconds) ? 'Elapsed ' + Math.floor(seconds / 60) + ':'
+            + String(seconds % 60).padStart(2, '0') : '';
+    }
+    function renderTraceStatus() {
+        const state = payload.processState || {};
+        traceStatus.hidden = !state.tracing;
+        const phase = (state.phase || 'Reading source') + (state.attempt > 0 && state.maximumAttempts > 0
+            ? ' (attempt ' + state.attempt + ' of ' + state.maximumAttempts + ')' : '');
+        if (tracePhase.textContent !== phase) tracePhase.textContent = phase;
+        if (state.tracing) {
+            updateElapsed();
+            if (traceTimer === null) traceTimer = setInterval(updateElapsed, 1000);
+        } else stopTraceTimer();
+        const failure = state.traceError || payload.error || '';
+        traceError.hidden = !failure;
+        if (traceError.textContent !== failure) traceError.textContent = failure;
     }
     function requestTrace() {
         if (payload.busy || !canTrace() || !question.value.trim()) return;
@@ -152,13 +182,16 @@
         submit.title = canTrace() ? 'Read the source again and trace this process' : 'Scan a project with source files first';
         submit.textContent = (payload.processState || {}).tracing ? 'Tracing...' : 'Trace process';
         stop.hidden = !(payload.processState || {}).tracing;
+        renderTraceStatus();
         breadcrumbs.textContent = '';
         breadcrumbs.append(P.button(scenario ? scenario.graph.title : 'Process', function() {
             const first = scenario && P.ancestors(scenario.graph, parent)[0]; setScope(null, first ? first.id : null);
         }, 'arch-crumb'));
         if (!scenario) {
             canvas.hidden = true; returns.textContent = ''; panel.render({ node: null });
-            message.hidden = false; message.textContent = canTrace() ? 'Describe a process to map its branches, joins and returns from source code.' : 'Scan a project with source files to build a process map.';
+            message.hidden = !traceError.hidden;
+            message.textContent = (payload.processState || {}).tracing ? 'The map will appear when source validation completes.'
+                : canTrace() ? 'Describe a process to map its branches, joins and returns from source code.' : 'Scan a project with source files to build a process map.';
             summary.textContent = 'Source interpretation'; openGroup.hidden = true; return;
         }
         canvas.hidden = false;
@@ -197,6 +230,6 @@
     direction.addEventListener('change', function() { remember(); render(payload); });
     focus.addEventListener('change', function() { surface.highlight(selected, focus.checked); });
     Object.assign(A, { process: { render: render, fit: surface.fit, reset: reset,
-        hide: function() { active = false; remember(); root.hidden = true; main.classList.remove('process-mode'); },
+        hide: function() { active = false; stopTraceTimer(); remember(); root.hidden = true; main.classList.remove('process-mode'); },
         ask: function() { question.focus(); } } });
 })(window['MVProcess'], window['MVArchitecture']);

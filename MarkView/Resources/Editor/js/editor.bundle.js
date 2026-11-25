@@ -10916,6 +10916,16 @@ window.MVPanels = {
   const formActions = P.element("div", "process-question-actions");
   formActions.append(picker, submit, stop);
   form.append(question, formActions);
+  const traceStatus = P.element("div", "process-trace-status");
+  traceStatus.hidden = true;
+  const tracePhase = P.element("span");
+  tracePhase.setAttribute("role", "status");
+  const traceElapsed = P.element("span", "arch-muted");
+  traceElapsed.setAttribute("aria-live", "off");
+  traceStatus.append(tracePhase, traceElapsed);
+  const traceError = P.element("p", "process-trace-error");
+  traceError.setAttribute("role", "alert");
+  traceError.hidden = true;
   const scopeInfo = P.element("details", "process-scope-info");
   const scopeTitle = P.element("summary", "", "Process context");
   const takeaway = P.element("p"), omitted = P.element("p");
@@ -10973,10 +10983,11 @@ window.MVPanels = {
       panel.element.scrollIntoView({ block: "start" });
     })
   );
-  root.append(form, scopeInfo, tools, context, message, canvas, returns, caption);
+  root.append(form, traceStatus, traceError, scopeInfo, tools, context, message, canvas, returns, caption);
   let payload = {}, project = null, activeID = null, parent = null, selected = null, source = 0;
   let requestedSource = "", savedChoices = "", savedVersion = "", awaiting = false, active = false;
   let renderedKey = "", pendingKey = "", layoutToken = 0;
+  let traceTimer = null;
   const layouts = /* @__PURE__ */ new Map(), poses = /* @__PURE__ */ new Map(), scopeSelections = /* @__PURE__ */ new Map(), pendingLevels = /* @__PURE__ */ new Set();
   const surface = P.makeViewport(canvas, {
     select,
@@ -11021,6 +11032,9 @@ window.MVPanels = {
     if (activeID) scopeSelections.set(activeID + "|" + (parent || ""), selected);
   }
   function reset() {
+    stopTraceTimer();
+    traceStatus.hidden = true;
+    traceError.hidden = true;
     remember();
     project = null;
     activeID = null;
@@ -11039,6 +11053,30 @@ window.MVPanels = {
     scopeSelections.clear();
     pendingLevels.clear();
     surface.clear();
+  }
+  function stopTraceTimer() {
+    if (traceTimer !== null) {
+      clearInterval(traceTimer);
+      traceTimer = null;
+    }
+  }
+  function updateElapsed() {
+    const started = Date.parse((payload.processState || {}).startedAt || "");
+    const seconds = Math.max(0, Math.floor((Date.now() - started) / 1e3));
+    traceElapsed.textContent = Number.isFinite(seconds) ? "Elapsed " + Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0") : "";
+  }
+  function renderTraceStatus() {
+    const state2 = payload.processState || {};
+    traceStatus.hidden = !state2.tracing;
+    const phase = (state2.phase || "Reading source") + (state2.attempt > 0 && state2.maximumAttempts > 0 ? " (attempt " + state2.attempt + " of " + state2.maximumAttempts + ")" : "");
+    if (tracePhase.textContent !== phase) tracePhase.textContent = phase;
+    if (state2.tracing) {
+      updateElapsed();
+      if (traceTimer === null) traceTimer = setInterval(updateElapsed, 1e3);
+    } else stopTraceTimer();
+    const failure = state2.traceError || payload.error || "";
+    traceError.hidden = !failure;
+    if (traceError.textContent !== failure) traceError.textContent = failure;
   }
   function requestTrace() {
     if (payload.busy || !canTrace() || !question.value.trim()) return;
@@ -11169,6 +11207,7 @@ window.MVPanels = {
     submit.title = canTrace() ? "Read the source again and trace this process" : "Scan a project with source files first";
     submit.textContent = (payload.processState || {}).tracing ? "Tracing..." : "Trace process";
     stop.hidden = !(payload.processState || {}).tracing;
+    renderTraceStatus();
     breadcrumbs.textContent = "";
     breadcrumbs.append(P.button(scenario ? scenario.graph.title : "Process", function() {
       const first = scenario && P.ancestors(scenario.graph, parent)[0];
@@ -11178,8 +11217,8 @@ window.MVPanels = {
       canvas.hidden = true;
       returns.textContent = "";
       panel.render({ node: null });
-      message.hidden = false;
-      message.textContent = canTrace() ? "Describe a process to map its branches, joins and returns from source code." : "Scan a project with source files to build a process map.";
+      message.hidden = !traceError.hidden;
+      message.textContent = (payload.processState || {}).tracing ? "The map will appear when source validation completes." : canTrace() ? "Describe a process to map its branches, joins and returns from source code." : "Scan a project with source files to build a process map.";
       summary.textContent = "Source interpretation";
       openGroup.hidden = true;
       return;
@@ -11259,6 +11298,7 @@ window.MVPanels = {
     reset,
     hide: function() {
       active = false;
+      stopTraceTimer();
       remember();
       root.hidden = true;
       main.classList.remove("process-mode");
