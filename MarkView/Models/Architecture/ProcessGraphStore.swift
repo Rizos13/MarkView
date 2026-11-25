@@ -5,6 +5,11 @@ import MarkViewCore
 final class ProcessGraphStore {
     struct State: Encodable {
         var tracing = false
+        var phase: String?
+        var attempt = 0
+        var maximumAttempts = 0
+        var startedAt: Date?
+        var traceError: String?
         var loading: String?
         var snippets: [String: ProcessSourceSnippet] = [:]
         var errors: [String: String] = [:]
@@ -12,6 +17,8 @@ final class ProcessGraphStore {
     }
 
     private weak var host: ArchitectureHost?
+    private static let maximumTraceAttempts = 3
+    private static let maximumTraceDuration: TimeInterval = 900
     private let tasks = TaskBag()
     private var generation = 0
     private var sourceGeneration = 0
@@ -43,20 +50,32 @@ final class ProcessGraphStore {
         generation += 1
         let ticket = generation
         state.tracing = true
+        state.phase = "Reading source"
+        state.attempt = 1
+        state.maximumAttempts = Self.maximumTraceAttempts
+        let started = Date()
+        state.startedAt = started
+        state.traceError = nil
+        host.setError(nil)
         host.setStatus("Tracing process from source")
         host.bump()
         let task = Task<Void, Never> { [weak self, weak host] in
             guard let self, let host else { return }
             defer {
                 host.endRun(run)
-                if self.generation == ticket { self.state.tracing = false; host.bump() }
+                if self.generation == ticket {
+                    self.state.tracing = false
+                    self.state.phase = nil
+                    host.setStatus(nil)
+                    host.bump()
+                }
             }
             do {
                 try Task.checkCancellation()
                 guard self.generation == ticket, host.rootPath == root.standardizedFileURL.path else { return }
                 let signature = modules.nodes.first(where: { $0.id == "m:" })?.signature ?? ""
                 let (graph, inspection) = try await self.generate(question: question, paths: paths, signature: signature,
-                                                                 root: root, db: db, host: host)
+                                                                 root: root, db: db, host: host, startedAt: started)
                 try Task.checkCancellation()
                 guard self.generation == ticket, host.rootPath == root.standardizedFileURL.path,
                       var next = host.snapshot else { return }
@@ -78,7 +97,9 @@ final class ProcessGraphStore {
                 return
             } catch {
                 guard self.generation == ticket, host.rootPath == root.standardizedFileURL.path else { return }
-                host.setError("Could not map the process: " + error.localizedDescription)
+                let message = "Could not map the process: " + error.localizedDescription
+                self.state.traceError = message
+                host.setError(message)
                 host.bump()
             }
         }
@@ -146,34 +167,48 @@ final class ProcessGraphStore {
     }
 
     private func generate(question: String, paths: Set<String>, signature: String, root: URL, db: SemanticDatabase?,
-                          host: ArchitectureHost) async throws -> (ProcessGraph, ProcessGraphSource.Inspection) {
+                          host: ArchitectureHost, startedAt: Date) async throws -> (ProcessGraph, ProcessGraphSource.Inspection) {
         let base = ProcessGraphPrompt.prompt(question: question, files: paths.sorted(), language: ArchitectureStore.graphLanguageLine)
             + "\nSource snapshot: " + signature
+        let deadline = startedAt.addingTimeInterval(Self.maximumTraceDuration)
         var prompt = base
-        for attempt in 0...1 {
+        for attempt in 1...Self.maximumTraceAttempts {
+            try Task.checkCancellation()
+            guard host.rootPath == root.standardizedFileURL.path else { throw CancellationError() }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                throw ProcessGraphSource.Failure(message: "Process tracing exceeded its 15-minute limit. Narrow the question and try again.")
+            }
+            state.attempt = attempt
+            state.phase = attempt == 1 ? "Reading source" : "Correcting map"
+            host.setStatus("\(state.phase ?? "Tracing process") (attempt \(attempt) of \(Self.maximumTraceAttempts))")
+            host.bump()
             var request = CLICompletion.Request(project: host.project ?? root, prompt: prompt,
                 systemPrompt: "Read the source without modifying it. Return only the requested process graph JSON.",
                 jsonSchema: ProcessGraphPrompt.schema, readableFolder: root)
             request.label = "process-graph"
-            request.timeout = 900
+            request.timeout = remaining
             let object = try await host.assistantCall(request, root: root, db: db, call: 0, fresh: true)
             try Task.checkCancellation()
+            guard host.rootPath == root.standardizedFileURL.path else { throw CancellationError() }
+            state.phase = "Checking map"
+            host.bump()
+            var candidate: ProcessGraph?
             do {
                 let data = try JSONSerialization.data(withJSONObject: object)
                 var graph = try JSONDecoder().decode(ProcessGraph.self, from: data)
                 graph.question = question
-                let candidate = graph
+                candidate = graph
+                let inspectedGraph = graph
                 let inspection = try await ProcessGraphSource.offMain {
-                    try ProcessGraphSource.inspect(candidate, root: root, allowedPaths: paths)
+                    try ProcessGraphSource.inspect(inspectedGraph, root: root, allowedPaths: paths)
                 }
                 return (graph, inspection)
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                guard attempt == 0 else { throw error }
-                let previous = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-                prompt = base + "\nRepair the previous answer. Keep supported node ids and relations.\n"
-                    + error.localizedDescription + "\nPrevious JSON:\n" + String(String(decoding: previous, as: UTF8.self).prefix(120_000))
+                guard attempt < Self.maximumTraceAttempts else { throw error }
+                prompt = try ProcessGraphPrompt.repair(base: base, previous: object, graph: candidate, error: error)
             }
         }
         throw ProcessGraphSource.Failure(message: "No usable process graph was returned.")

@@ -30,6 +30,10 @@ private final class ProcessTestHost: ArchitectureHost {
     var status: String?
     var isBusy = false
     var response: ProcessGraph
+    var responses: [ProcessGraph] = []
+    var requests: [CLICompletion.Request] = []
+    var error: String?
+    var commits = 0
     var calls = 0
     private var token = 0
 
@@ -41,11 +45,11 @@ private final class ProcessTestHost: ArchitectureHost {
     }
 
     func outline(for path: String) -> XRayContent.Outline? { nil }
-    func commit(_ next: ArchitectureSnapshot, db: SemanticDatabase?) { snapshot = next }
+    func commit(_ next: ArchitectureSnapshot, db: SemanticDatabase?) { snapshot = next; commits += 1 }
     func show(_ next: ArchitectureSnapshot) { snapshot = next }
     func answerCache(_ root: URL) -> URL { root }
     func bump() {}
-    func setError(_ message: String?) {}
+    func setError(_ message: String?) { error = message }
     func setStatus(_ text: String?) { status = text }
     func beginRun() -> Int { token += 1; isBusy = true; return token }
     func endRun(_ run: Int) { if run == token { isBusy = false } }
@@ -53,12 +57,70 @@ private final class ProcessTestHost: ArchitectureHost {
                        call: Int, fresh: Bool) async throws -> [String: Any] {
         try request.validateSchema()
         calls += 1
-        let data = try JSONEncoder().encode(response)
+        requests.append(request)
+        let answer = responses.isEmpty ? response : responses.removeFirst()
+        let data = try JSONEncoder().encode(answer)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }
 
 extension EditorHostTests {
+    @MainActor func testProcessRepairsMissingEndpointsThenAnUnmarkedCycleBeforeCommitting() async throws {
+        let (root, original, modules) = try processFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var missing = original
+        missing.edges[0].to = "undeclared_step"
+        var cycle = original
+        cycle.edges.append(.init(id: "still_held", from: "result", to: "entry", kind: .branch,
+                                 label: "Needs another check", sources: original.edges[0].sources))
+        var corrected = cycle
+        corrected.edges[1].kind = .return
+        let host = ProcessTestHost(root: root, graph: original, modules: modules)
+        host.responses = [missing, cycle, corrected]
+        let store = ProcessGraphStore(host: host)
+        await store.trace(question: original.question, root: root, db: nil)?.value
+        XCTAssertEqual(host.calls, 3)
+        XCTAssertEqual(host.commits, 1)
+        XCTAssertEqual(host.snapshot?.processGraphs?.first?.graph, corrected)
+        XCTAssertNil(host.error)
+        XCTAssertNil(store.state.traceError)
+        XCTAssertFalse(store.state.tracing)
+        XCTAssertNil(store.state.phase)
+        XCTAssertEqual(store.state.attempt, 3)
+        XCTAssertEqual(store.state.maximumAttempts, 3)
+        XCTAssertTrue(host.requests[1].prompt.contains("undeclared_step"))
+        XCTAssertTrue(host.requests[2].prompt.contains("still_held"))
+        let timeouts = try host.requests.map { try XCTUnwrap($0.timeout) }
+        XCTAssertTrue(timeouts.allSatisfy { $0 > 0 && $0 <= 900 })
+        XCTAssertLessThan(timeouts[2], timeouts[0])
+    }
+
+    @MainActor func testProcessStopsAfterThreeInvalidAnswersAndKeepsThePreviousMap() async throws {
+        let (root, original, modules) = try processFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var invalid = original
+        invalid.edges[0].to = "undeclared_step"
+        let previous = ProcessScenario(graph: original, signatures: [:], sourceHashes: [:])
+        let host = ProcessTestHost(root: root, graph: invalid, modules: modules)
+        host.snapshot?.processGraphs = [previous]
+        let store = ProcessGraphStore(host: host)
+        await store.trace(question: original.question, root: root, db: nil)?.value
+        XCTAssertEqual(host.calls, 3)
+        XCTAssertEqual(host.commits, 0)
+        XCTAssertEqual(host.snapshot?.processGraphs, [previous])
+        XCTAssertTrue(try XCTUnwrap(store.state.traceError).contains("undeclared_step"))
+        XCTAssertEqual(host.error, store.state.traceError)
+        XCTAssertFalse(host.isBusy)
+        XCTAssertFalse(store.state.tracing)
+        host.response = original
+        await store.trace(question: original.question, root: root, db: nil)?.value
+        XCTAssertEqual(host.calls, 4)
+        XCTAssertEqual(host.commits, 1)
+        XCTAssertNil(host.error)
+        XCTAssertNil(store.state.traceError)
+        XCTAssertEqual(host.snapshot?.processGraphs?.first?.id, previous.id)
+    }
+
     func testProcessSourceClippingAndChangedSource() throws {
         let (root, graph, _) = try processFixture()
         defer { try? FileManager.default.removeItem(at: root) }
